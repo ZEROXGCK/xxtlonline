@@ -5,7 +5,8 @@
 #
 #  วิธีใช้ (วางไฟล์นี้ไว้โฟลเดอร์เดียวกับ wselx-sell.zip และ xxtlonline_panel.zip):
 #      sudo bash setup.sh                   # ถามโดเมน แล้วทำให้ทุกอย่าง
-#      sudo bash setup.sh shop.example.com  # ไม่ถามอะไรเลย
+#      sudo bash setup.sh shop.example.com  # ถามแค่ชื่อผู้ใช้/รหัสแอดมิน (กด Enter ข้าม = admin + รหัสสุ่ม)
+#      sudo bash setup.sh shop.example.com myuser 'MyPass123'   # ไม่ถามอะไรเลย
 #  หรือสั่งบรรทัดเดียว (โหลด zip จาก GitHub ให้เอง):
 #      curl -fsSL https://raw.githubusercontent.com/ZEROXGCK/xxtlonline/main/setup.sh | sudo bash
 #
@@ -102,6 +103,11 @@ if [ "${SKIP_DNS_CHECK:-0}" != 1 ]; then
 fi
 
 # ---------- 2) บัญชีแอดมินชุดเดียว ----------
+ADMIN_USERNAME="${ADMIN_USERNAME:-${2:-}}"
+ADMIN_PASSWORD="${ADMIN_PASSWORD:-${3:-}}"
+if [ -z "$ADMIN_USERNAME" ] && [ -r /dev/tty ]; then
+  read -r -p "  ชื่อผู้ใช้แอดมิน (ใช้ร่วมทุกระบบ) [admin]: " ADMIN_USERNAME </dev/tty || true
+fi
 ADMIN_USERNAME="${ADMIN_USERNAME:-admin}"
 [[ "$ADMIN_USERNAME" =~ ^[A-Za-z0-9_.-]{3,30}$ ]] || die "ADMIN_USERNAME ไม่ถูกต้อง (3-30 ตัว a-z 0-9 _ . -)"
 FRESH_SHOP=0; [ -f "$APP_DIR/.env" ] || FRESH_SHOP=1
@@ -109,6 +115,17 @@ FRESH_DASH=0; [ -f /etc/xxtlonline/dashboard.json ] || FRESH_DASH=1
 PW_NOTE="(ใช้รหัสเดิมของการติดตั้งก่อนหน้า)"
 FRESH_XUI=0; [ "${SKIP_3XUI:-0}" != 1 ] && [ ! -x /usr/local/x-ui/x-ui ] && FRESH_XUI=1
 if [ "$FRESH_SHOP" = 1 ] || [ "$FRESH_DASH" = 1 ] || [ "$FRESH_XUI" = 1 ]; then
+  if [ -z "$ADMIN_PASSWORD" ] && [ -r /dev/tty ]; then
+    while :; do
+      read -rs -p "  รหัสผ่านแอดมิน อย่างน้อย 8 ตัว (กด Enter = สุ่มให้): " P1 </dev/tty || true; echo
+      [ -z "$P1" ] && break
+      if [ "${#P1}" -lt 8 ]; then warn "สั้นกว่า 8 ตัว ลองใหม่"; continue; fi
+      if [[ "$P1" =~ [^A-Za-z0-9\!@#%^\&*_+=.,-] ]]; then warn "ใช้ได้เฉพาะ a-z A-Z 0-9 และ !@#%^&*_+=.,- (ไม่ใช้เว้นวรรค ' \" \\ \$ \`)"; continue; fi
+      read -rs -p "  ยืนยันรหัสผ่านอีกครั้ง: " P2 </dev/tty || true; echo
+      [ "$P1" = "$P2" ] && { ADMIN_PASSWORD="$P1"; break; } || warn "สองครั้งไม่ตรงกัน ลองใหม่"
+    done
+  fi
+  [[ -z "$ADMIN_PASSWORD" || "$ADMIN_PASSWORD" =~ ^[A-Za-z0-9\!@#%^\&*_+=.,-]+$ ]] || die "ADMIN_PASSWORD มีอักขระที่ไม่รองรับ (ใช้ a-z A-Z 0-9 !@#%^&*_+=.,-)"
   ADMIN_PASSWORD="${ADMIN_PASSWORD:-$(openssl rand -hex 10)}"
   [ "${#ADMIN_PASSWORD}" -ge 8 ] || die "ADMIN_PASSWORD ต้องยาวอย่างน้อย 8 ตัว"
   PW_NOTE="$ADMIN_PASSWORD"
@@ -120,6 +137,7 @@ else
 fi
 
 say "เริ่มติดตั้งสำหรับ $DOMAIN (IP $IP)"
+echo "   เมื่อเสร็จ หน้าร้านจะอยู่ที่: https://$DOMAIN/"
 
 # ---------- 3) ซอร์สโค้ด ----------
 XXTL_DIR="$(find_src xxtlonline XXTL_ZIP 'xxtlonline*.zip' install.sh "$XXTL_REMOTE_ZIP")" \
@@ -343,8 +361,7 @@ PY
 echo "   VPN WebSocket พอร์ต 80          → $VPN_OK"
 
 # ---------- 10) สรุป ----------
-umask 077
-cat > "$INFO_FILE" <<EOF
+( umask 077; cat > "$INFO_FILE" <<EOF
 ร้านค้า        : https://$DOMAIN/
 แดชบอร์ด VPN  : https://$DOMAIN/panel/
 $([ "$XUI_OK" = 1 ] && echo "3x-ui         : https://$DOMAIN/$XUI_BASE/   (สร้าง inbound แล้วใช้พอร์ตอื่นที่ไม่ใช่ 22/80/443 และเปิดด้วย ufw allow <พอร์ต>/tcp)")
@@ -361,9 +378,20 @@ $([ "$XUI_OK" = 1 ] && echo "3x-ui         : https://$DOMAIN/$XUI_BASE/   (ส�
   (พอร์ต 80 ใช้ร่วมกับเว็บ: payload ต้องมี Upgrade: websocket เพื่อแยกจากการเปิดเว็บ — พอร์ต 22 เป็น VPN ล้วน)
 SSH ของแอดมินเซิร์ฟเวอร์ถูกย้ายไปพอร์ต 2222 (ssh -p 2222 root@$IP) เพราะพอร์ต 22 ใช้เป็น SSH+HTTP
 EOF
+)
 chmod 600 "$INFO_FILE"
 
 echo
+printf '\033[1;32m'
+echo "  ╔══════════════════════════════════════════════════════════"
+echo "  ║  🛒 หน้าร้านค้า      : https://$DOMAIN/"
+echo "  ║  🔐 แอดมินร้านค้า    : https://$DOMAIN/   (ล็อกอินด้วยบัญชีแอดมิน)"
+echo "  ║  📡 แดชบอร์ด VPN    : https://$DOMAIN/panel/"
+[ "$XUI_OK" != 1 ] || echo "  ║  🧩 แผง 3x-ui        : https://$DOMAIN/$XUI_BASE/"
+echo "  ║  👤 ผู้ใช้ : $ADMIN_USERNAME    🔑 รหัส : $PW_NOTE"
+echo "  ╚══════════════════════════════════════════════════════════"
+printf '\033[0m'
+[ "$CERT_OK" = 1 ] || warn "ยังไม่มี HTTPS จริง — เปิดลิงก์ด้านบนแล้วเบราว์เซอร์จะเตือนใบรับรอง (กดดำเนินการต่อได้) แล้วรันสคริปต์ซ้ำเมื่อ DNS พร้อม"
 if [ "$FAIL" = 0 ]; then say "ติดตั้งเสร็จแล้ว ✅"; else warn "มีบริการที่ไม่ทำงาน ดู: journalctl -u wselx -u xxtlonline-ws -n 40"; fi
 sed 's/^/  /' "$INFO_FILE"
 cat <<EOF
