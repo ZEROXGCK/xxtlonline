@@ -27,7 +27,9 @@
 #      SKIP_DNS_CHECK=1       ข้ามการตรวจ DNS (ไม่แนะนำ)
 #      SKIP_3XUI=1            ไม่ติดตั้ง 3x-ui
 # =====================================================================
-set -euo pipefail
+set -Eeuo pipefail
+# ถ้าสคริปต์หยุดกลางทาง ให้บอกว่าหยุดที่บรรทัดไหน/คำสั่งอะไร (ไม่หยุดเงียบ ๆ)
+trap 'rc=$?; printf "\033[1;31m[x] สคริปต์หยุดที่บรรทัด %s (รหัส %s): %s\033[0m\n" "$LINENO" "$rc" "$BASH_COMMAND" >&2' ERR
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd || pwd)"
 WSELX_SRC="${WSELX_SRC:-/opt/wselx-src}"
@@ -39,6 +41,7 @@ WSELX_REMOTE_ZIP="${WSELX_REMOTE_ZIP:-wselx-sell.zip}"
 XXTL_REMOTE_ZIP="${XXTL_REMOTE_ZIP:-xxtlonline_panel.zip}"
 WEB_HTTP_PORT=8081      # nginx ฝั่งหลังบ้าน (ฟัง 127.0.0.1 เท่านั้น) — รับต่อจากพอร์ต 80
 WEB_TLS_PORT=8082       # nginx ฝั่งหลังบ้าน (ฟัง 127.0.0.1 เท่านั้น) — รับต่อจากพอร์ต 443
+DASH_HTTPS_PORT="${DASH_HTTPS_PORT:-8777}"   # เปิดแดชบอร์ดตรงที่ https://โดเมน:8777 ด้วย (นอกจาก /panel/)
 XUI_PORT=2053           # พอร์ตแผง 3x-ui (ฟัง 127.0.0.1 เท่านั้น เข้าผ่าน https://โดเมน/xui/)
 XUI_BASE=xui
 XXTL_CONF=/etc/xxtlonline/xxtlonline.conf
@@ -220,7 +223,9 @@ systemctl restart nginx || die "nginx ไม่ขึ้น (ตรวจพอ�
 # ---------- 5) xxtlonline (SSH WebSocket พอร์ต 80 + TLS พอร์ต 443 + แดชบอร์ด) ----------
 say "ติดตั้ง xxtlonline"
 XXTLONLINE_DASH_USER="$ADMIN_USERNAME" XXTLONLINE_DASH_PASSWORD="$ADMIN_PASSWORD" \
-  bash "$XXTL_DIR/install.sh" --yes --ssl-port 443
+  bash "$XXTL_DIR/install.sh" --yes --ssl-port 443 \
+  || die "ติดตั้ง xxtlonline ไม่สำเร็จ (ดูข้อความด้านบน) — แก้แล้วรัน setup.sh ซ้ำได้"
+echo; echo "xxtlonline ติดตั้งเสร็จ — ต่อด้วยตั้งค่าเว็บ/HTTPS/ร้านค้า (ยังไม่จบ อย่าเพิ่งปิดหน้าจอ)"
 
 systemctl is-active --quiet xxtlonline-dash || die "แดชบอร์ด xxtlonline ไม่ทำงาน (ดู: journalctl -u xxtlonline-dash -n 30)"
 
@@ -310,6 +315,7 @@ L=/etc/letsencrypt/live/${DOMAIN}
 install -m 600 "\$L/privkey.pem"   /etc/xxtlonline/ssl/key.pem
 install -m 644 "\$L/fullchain.pem" /etc/xxtlonline/ssl/cert.pem
 systemctl kill -s HUP --kill-who=main xxtlonline-ws 2>/dev/null || true
+systemctl reload nginx 2>/dev/null || true
 HOOK
 chmod 755 /etc/letsencrypt/renewal-hooks/deploy/xxtlonline-ws.sh
 
@@ -333,9 +339,39 @@ else
   warn "ตรวจ DNS/พอร์ต 80 เปิดจากภายนอก แล้วรันสคริปต์นี้ซ้ำ (ไม่กระทบข้อมูลเดิม)"
 fi
 
+# ---------- 8.5) แดชบอร์ดที่ https://โดเมน:$DASH_HTTPS_PORT (nginx ถือพอร์ตนี้เอง ใช้ใบรับรองเดียวกัน) ----------
+DASH_PORT_OK=0
+if [ "$CERT_OK" = 1 ]; then
+  cat > /etc/nginx/conf.d/xxtl-dash-port.conf <<NGX
+server {
+    listen ${DASH_HTTPS_PORT} ssl;
+    listen [::]:${DASH_HTTPS_PORT} ssl;
+    server_name ${DOMAIN};
+    ssl_certificate     /etc/letsencrypt/live/${DOMAIN}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/${DOMAIN}/privkey.pem;
+    ssl_protocols       TLSv1.2 TLSv1.3;
+    add_header Strict-Transport-Security "max-age=31536000" always;
+    client_max_body_size 8k;
+    location / {
+        proxy_pass http://127.0.0.1:8088;
+        proxy_http_version 1.1;
+        proxy_set_header Host              \$host;
+        proxy_set_header X-Real-IP         \$remote_addr;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_cookie_path /panel /;
+        proxy_read_timeout 30s;
+    }
+}
+NGX
+  sed -i 's#proxy_cookie_path /[a-z]* /;#proxy_cookie_path /panel /;#' /etc/nginx/conf.d/xxtl-dash-port.conf
+  if nginx -t >/dev/null 2>&1 && systemctl reload nginx; then DASH_PORT_OK=1
+  else rm -f /etc/nginx/conf.d/xxtl-dash-port.conf; warn "ตั้งแดชบอร์ดพอร์ต $DASH_HTTPS_PORT ไม่สำเร็จ — ใช้ https://$DOMAIN/panel/ แทนได้"; fi
+fi
+
 # ---------- 9) firewall + ตรวจระบบ ----------
 if command -v ufw >/dev/null && ufw status | grep -q "Status: active"; then
   ufw allow 80/tcp >/dev/null || true; ufw allow 443/tcp >/dev/null || true
+  [ "$DASH_PORT_OK" != 1 ] || ufw allow "$DASH_HTTPS_PORT"/tcp >/dev/null || true
 fi
 
 say "ตรวจระบบ"
@@ -363,7 +399,7 @@ echo "   VPN WebSocket พอร์ต 80          → $VPN_OK"
 # ---------- 10) สรุป ----------
 ( umask 077; cat > "$INFO_FILE" <<EOF
 ร้านค้า        : https://$DOMAIN/
-แดชบอร์ด VPN  : https://$DOMAIN/panel/
+แดชบอร์ด VPN  : $([ "$DASH_PORT_OK" = 1 ] && echo "https://$DOMAIN:$DASH_HTTPS_PORT  หรือ ")https://$DOMAIN/panel/
 $([ "$XUI_OK" = 1 ] && echo "3x-ui         : https://$DOMAIN/$XUI_BASE/   (สร้าง inbound แล้วใช้พอร์ตอื่นที่ไม่ใช่ 22/80/443 และเปิดด้วย ufw allow <พอร์ต>/tcp)")
 แอดมิน (ใช้ร่วมกันทั้งสามระบบ)
   ชื่อผู้ใช้   : $ADMIN_USERNAME
@@ -386,7 +422,8 @@ printf '\033[1;32m'
 echo "  ╔══════════════════════════════════════════════════════════"
 echo "  ║  🛒 หน้าร้านค้า      : https://$DOMAIN/"
 echo "  ║  🔐 แอดมินร้านค้า    : https://$DOMAIN/   (ล็อกอินด้วยบัญชีแอดมิน)"
-echo "  ║  📡 แดชบอร์ด VPN    : https://$DOMAIN/panel/"
+[ "$DASH_PORT_OK" != 1 ] || echo "  ║  📡 แดชบอร์ด VPN    : https://$DOMAIN:$DASH_HTTPS_PORT"
+echo "  ║  📡 แดชบอร์ด (สำรอง) : https://$DOMAIN/panel/"
 [ "$XUI_OK" != 1 ] || echo "  ║  🧩 แผง 3x-ui        : https://$DOMAIN/$XUI_BASE/"
 echo "  ║  👤 ผู้ใช้ : $ADMIN_USERNAME    🔑 รหัส : $PW_NOTE"
 echo "  ╚══════════════════════════════════════════════════════════"
