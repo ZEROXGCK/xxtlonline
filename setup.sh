@@ -10,6 +10,7 @@
 #  หรือสั่งบรรทัดเดียว (โหลด zip จาก GitHub ให้เอง):
 #      curl -fsSL https://raw.githubusercontent.com/ZEROXGCK/xxtlonline/main/setup.sh | sudo bash
 #
+#  พอร์ต 22 = OpenSSH ของเครื่อง (ไม่ถูกย้าย/ไม่ถูกแย่ง) รันซ้ำเพื่อกู้เครื่องที่เคยโดนย้ายไป 2222 ได้
 #  ผลลัพธ์ (โดเมนเดียว ใช้พอร์ต 80 และ 443 ร่วมกันทั้ง VPN และเว็บ):
 #      https://โดเมน/         เว็บร้านค้า (wselx)
 #      https://โดเมน/panel/   แดชบอร์ด xxtlonline
@@ -139,6 +140,20 @@ else
   ADMIN_PASSWORD=""   # ติดตั้งซ้ำ = อัปเดต ไม่แตะรหัสเดิม
 fi
 
+
+# ---------- 2.5) กู้พอร์ต 22 คืนให้ OpenSSH (ถ้ารอบก่อนสคริปต์เก่าย้าย SSH ไปพอร์ต 2222) ----------
+OLD_PW=""
+if [ -f "$INFO_FILE" ]; then
+  OLD_PW="$(awk -F': *' '/รหัสผ่าน/{print $2; exit}' "$INFO_FILE" 2>/dev/null || true)"
+  case "$OLD_PW" in "("*|"") OLD_PW="" ;; esac
+fi
+if [ -f /etc/ssh/sshd_config.xxtlonline.bak ] && [ -x /usr/local/bin/xxtlonline ]; then
+  say "พบว่ารอบก่อนย้าย SSH ไปพอร์ตอื่น — คืนพอร์ต 22 ให้ OpenSSH"
+  /usr/local/bin/xxtlonline port22 off || warn "คืนพอร์ต 22 อัตโนมัติไม่สำเร็จ — เข้าด้วย ssh -p 2222 แล้วสั่ง: xxtlonline port22 off"
+fi
+command -v ufw >/dev/null && ufw status 2>/dev/null | grep -q "Status: active" && ufw allow 22/tcp >/dev/null 2>&1 || true
+
+[ -z "$ADMIN_PASSWORD" ] && [ -n "$OLD_PW" ] && PW_NOTE="$OLD_PW"
 say "เริ่มติดตั้งสำหรับ $DOMAIN (IP $IP)"
 echo "   เมื่อเสร็จ หน้าร้านจะอยู่ที่: https://$DOMAIN/"
 
@@ -223,7 +238,7 @@ systemctl restart nginx || die "nginx ไม่ขึ้น (ตรวจพอ�
 # ---------- 5) xxtlonline (SSH WebSocket พอร์ต 80 + TLS พอร์ต 443 + แดชบอร์ด) ----------
 say "ติดตั้ง xxtlonline"
 XXTLONLINE_DASH_USER="$ADMIN_USERNAME" XXTLONLINE_DASH_PASSWORD="$ADMIN_PASSWORD" \
-  bash "$XXTL_DIR/install.sh" --yes --ssl-port 443 \
+  bash "$XXTL_DIR/install.sh" --yes --no-port22 --ssl-port 443 \
   || die "ติดตั้ง xxtlonline ไม่สำเร็จ (ดูข้อความด้านบน) — แก้แล้วรัน setup.sh ซ้ำได้"
 echo; echo "xxtlonline ติดตั้งเสร็จ — ต่อด้วยตั้งค่าเว็บ/HTTPS/ร้านค้า (ยังไม่จบ อย่าเพิ่งปิดหน้าจอ)"
 
@@ -406,13 +421,13 @@ $([ "$XUI_OK" = 1 ] && echo "3x-ui         : https://$DOMAIN/$XUI_BASE/   (ส�
   รหัสผ่าน    : $PW_NOTE
 แอป VPN (NPV / NetMod / HTTP Custom: SSH + HTTP/WebSocket)
   Address     : $DOMAIN
-  SSH + HTTP  : พอร์ต 22 หรือ 80
+  SSH + HTTP  : พอร์ต 80 / 8080 / 8880
   HTTP Proxy  : พอร์ต 80 (ช่อง Proxy = ของค่าย, Address/Port ยังเป็นเครื่องนี้)
   SSL/TLS     : พอร์ต 443 (ตั้ง SNI = $DOMAIN)
   Response    : 200 Connection established
   Payload     : GET / HTTP/1.1[crlf]Host: [host][crlf]Upgrade: websocket[crlf][crlf]
-  (พอร์ต 80 ใช้ร่วมกับเว็บ: payload ต้องมี Upgrade: websocket เพื่อแยกจากการเปิดเว็บ — พอร์ต 22 เป็น VPN ล้วน)
-SSH ของแอดมินเซิร์ฟเวอร์ถูกย้ายไปพอร์ต 2222 (ssh -p 2222 root@$IP) เพราะพอร์ต 22 ใช้เป็น SSH+HTTP
+  (พอร์ต 80 ใช้ร่วมกับเว็บ: payload ต้องมี Upgrade: websocket เพื่อแยกจากการเปิดเว็บ)
+พอร์ต 22 ว่างไว้ให้ SSH ของเครื่อง (ssh root@$IP) ตามเดิม — สคริปต์นี้ไม่แตะ
 EOF
 )
 chmod 600 "$INFO_FILE"
@@ -425,7 +440,9 @@ echo "  ║  🔐 แอดมินร้านค้า    : https://$DOMAIN/ 
 [ "$DASH_PORT_OK" != 1 ] || echo "  ║  📡 แดชบอร์ด VPN    : https://$DOMAIN:$DASH_HTTPS_PORT"
 echo "  ║  📡 แดชบอร์ด (สำรอง) : https://$DOMAIN/panel/"
 [ "$XUI_OK" != 1 ] || echo "  ║  🧩 แผง 3x-ui        : https://$DOMAIN/$XUI_BASE/"
-echo "  ║  👤 ผู้ใช้ : $ADMIN_USERNAME    🔑 รหัส : $PW_NOTE"
+echo "  ║  👤 Username : $ADMIN_USERNAME"
+echo "  ║  🔑 Password : $PW_NOTE"
+echo "  ║  🔌 SSH เครื่อง : ssh root@$IP  (พอร์ต 22 ปกติ)"
 echo "  ╚══════════════════════════════════════════════════════════"
 printf '\033[0m'
 [ "$CERT_OK" = 1 ] || warn "ยังไม่มี HTTPS จริง — เปิดลิงก์ด้านบนแล้วเบราว์เซอร์จะเตือนใบรับรอง (กดดำเนินการต่อได้) แล้วรันสคริปต์ซ้ำเมื่อ DNS พร้อม"
