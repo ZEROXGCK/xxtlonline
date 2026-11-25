@@ -105,6 +105,9 @@ install_xxtl() {
   src="$(find_src xxtlonline XXTL_ZIP 'xxtlonline*.zip' install.sh "$XXTL_REMOTE_ZIP")" \
     || die "หา/โหลด xxtlonline ไม่สำเร็จ — เช็กชื่อ zip บน GitHub (XXTL_REMOTE_ZIP) หรือตั้ง XXTL_ZIP=/path/file.zip"
   echo "ซอร์ส: $src"
+  # แก้บั๊กใน install.sh: บรรทัดหา SSH port ใช้ pipe ร่วมกับ set -e/pipefail ถ้า sshd -T ล้มเหลว
+  # หรือโดน SIGPIPE สคริปต์จะหยุดเงียบๆ ที่ขั้น [5/6] firewall (แก้ซ้ำได้ปลอดภัย)
+  sed -i "s#awk '/^port /{print \$2; exit}')#awk '/^port /{print \$2; exit}' || true)#" "$src/install.sh"
   # ติดตั้งจากไฟล์ในเครื่องโดยตรง (ไม่ดึงจาก GitHub) — ต้องรันจาก path จริงเพื่อให้สคริปต์หา src/ เจอ
   bash "$src/install.sh" "$@"
 }
