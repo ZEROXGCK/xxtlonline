@@ -32,6 +32,8 @@
 #      WSELX_ZIP / XXTL_ZIP   path ของ zip (ไม่ตั้ง = หาข้างสคริปต์; xxtlonline ไม่โหลดจาก GitHub เด็ดขาด)
 #      SKIP_DNS_CHECK=1       ข้ามการตรวจ DNS (ไม่แนะนำ)
 #      SKIP_3XUI=1            ไม่ติดตั้ง 3x-ui
+#      SHOP_HTTPS_PORT พอร์ตร้านค้าตรง https://โดเมน:พอร์ต (ค่าเริ่มต้น 7778)
+#      DASH_HTTPS_PORT พอร์ตแดชบอร์ดตรง https://โดเมน:พอร์ต (ค่าเริ่มต้น 6787)
 # =====================================================================
 set -Eeuo pipefail
 # ถ้าสคริปต์หยุดกลางทาง ให้บอกว่าหยุดที่บรรทัดไหน/คำสั่งอะไร (ไม่หยุดเงียบ ๆ)
@@ -44,7 +46,8 @@ GH_REPO="${GH_REPO:-ZEROXGCK/xxtlonline}"
 GH_BRANCH="${GH_BRANCH:-main}"
 RAW_BASE="https://raw.githubusercontent.com/$GH_REPO/$GH_BRANCH"
 WSELX_REMOTE_ZIP="${WSELX_REMOTE_ZIP:-wselx-sell.zip}"
-DASH_HTTPS_PORT="${DASH_HTTPS_PORT:-8777}"   # เปิดแดชบอร์ดตรงที่ https://โดเมน:8777 ด้วย (นอกจาก /panel/)
+DASH_HTTPS_PORT="${DASH_HTTPS_PORT:-6787}"   # เปิดแดชบอร์ดตรงที่ https://โดเมน:6787 ด้วย (นอกจาก /panel/)
+SHOP_HTTPS_PORT="${SHOP_HTTPS_PORT:-7778}"   # เปิดร้านค้าตรงที่ https://โดเมน:7778 ด้วย (นอกจากพอร์ต 443)
 XUI_PORT=2053           # พอร์ตแผง 3x-ui (ฟัง 127.0.0.1 เท่านั้น เข้าผ่าน https://โดเมน/xui/)
 XUI_BASE=xui
 XXTL_CONF=/etc/xxtlonline/xxtlonline.conf
@@ -416,6 +419,35 @@ REPO_URL="$WSELX_SRC" BRANCH=main APP_DIR="$APP_DIR" \
     nginx -t >/dev/null 2>&1 && systemctl reload nginx || true
   fi
 
+  # ร้านค้าที่ https://โดเมน:$SHOP_HTTPS_PORT (ใช้เมื่อมีใบรับรองจริง; ไม่แตะ 3x-ui/แดชบอร์ด)
+  rm -f /etc/nginx/conf.d/xxtl-shop-port.conf
+  if [ -s "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" ]; then
+    cat > /etc/nginx/conf.d/xxtl-shop-port.conf <<NGX
+server {
+    listen ${SHOP_HTTPS_PORT} ssl;
+    listen [::]:${SHOP_HTTPS_PORT} ssl;
+    server_name ${DOMAIN};
+    ssl_certificate     /etc/letsencrypt/live/${DOMAIN}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/${DOMAIN}/privkey.pem;
+    ssl_protocols       TLSv1.2 TLSv1.3;
+    client_max_body_size 15m;
+    location / {
+        proxy_pass http://127.0.0.1:3000;
+        proxy_set_header Host              \$host;
+        proxy_set_header X-Real-IP         \$remote_addr;
+        proxy_set_header X-Forwarded-For   \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+    }
+}
+NGX
+    if nginx -t >/dev/null 2>&1; then
+      systemctl reload nginx || true
+      if command -v ufw >/dev/null && ufw status | grep -q "Status: active"; then ufw allow "$SHOP_HTTPS_PORT"/tcp >/dev/null || true; fi
+    else
+      rm -f /etc/nginx/conf.d/xxtl-shop-port.conf; warn "เปิดร้านค้าที่พอร์ต $SHOP_HTTPS_PORT ไม่สำเร็จ (nginx -t ไม่ผ่าน) — ยังใช้ https://$DOMAIN/ ได้"
+    fi
+  fi
+
 }
 
 detect_state() {
@@ -430,7 +462,7 @@ detect_state() {
 write_info() {
   detect_state
   ( umask 077; {
-    [ "$HAVE_SHOP" = 1 ]  && echo "ร้านค้า        : https://$DOMAIN/"
+    [ "$HAVE_SHOP" = 1 ]  && echo "ร้านค้า        : https://$DOMAIN/$([ -f /etc/nginx/conf.d/xxtl-shop-port.conf ] && echo "  หรือ https://$DOMAIN:$SHOP_HTTPS_PORT")"
     if [ "$HAVE_PANEL" = 1 ]; then
       echo "แดชบอร์ด VPN  : $([ "$DASH_PORT_OK" = 1 ] && echo "https://$DOMAIN:$DASH_HTTPS_PORT  หรือ ")https://$DOMAIN/panel/"
       [ "$XUI_OK" = 1 ] && echo "3x-ui         : https://$DOMAIN/$XUI_BASE/   (สร้าง inbound แล้วใช้พอร์ตอื่นที่ไม่ใช่ 22/80/443 และเปิดด้วย ufw allow <พอร์ต>/tcp)"
