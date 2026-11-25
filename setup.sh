@@ -5,6 +5,9 @@
 #  วางไฟล์นี้ไว้โฟลเดอร์เดียวกับไฟล์ zip ทั้งสอง แล้วรัน:
 #      sudo bash setup.sh
 #
+#  หรือสั่งบรรทัดเดียว (โหลด zip จาก GitHub ให้เอง):
+#      curl -fsSL https://raw.githubusercontent.com/ZEROXGCK/xxtlonline/main/setup.sh | sudo bash
+#
 #  เมนู:
 #      1) ติดตั้ง wselx        (เว็บร้านค้า + บอท)
 #      2) ติดตั้ง xxtlonline    (SSH WebSocket + แดชบอร์ด)
@@ -23,6 +26,12 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 WSELX_SRC="${WSELX_SRC:-/opt/wselx-src}"
+# ที่เก็บบน GitHub (ใช้ตอนไม่มี zip ในเครื่อง เช่นสั่งผ่าน curl | bash)
+GH_REPO="${GH_REPO:-ZEROXGCK/xxtlonline}"
+GH_BRANCH="${GH_BRANCH:-main}"
+RAW_BASE="https://raw.githubusercontent.com/$GH_REPO/$GH_BRANCH"
+WSELX_REMOTE_ZIP="${WSELX_REMOTE_ZIP:-wselx-sell.zip}"
+XXTL_REMOTE_ZIP="${XXTL_REMOTE_ZIP:-xxtlonline_panel.zip}"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
@@ -34,10 +43,10 @@ die()  { printf '\033[1;31m[x] %s\033[0m\n' "$*" >&2; exit 1; }
 command -v apt-get >/dev/null || die "รองรับเฉพาะ Ubuntu/Debian (apt)"
 
 # ---------- ช่วยหาและแตกไฟล์ต้นทาง ----------
-# find_src <ชื่อโฟลเดอร์> <ตัวแปร zip> <pattern zip> <ไฟล์ที่ต้องมีเพื่อยืนยัน>
+# find_src <ชื่อโฟลเดอร์> <ตัวแปร zip> <pattern zip> <ไฟล์ที่ต้องมีเพื่อยืนยัน> <ชื่อ zip บน GitHub>
 # พิมพ์ path โฟลเดอร์ซอร์สที่พร้อมใช้ (แตกใน $WORK ถ้าเป็น zip)
 find_src() {
-  local name="$1" zipvar="$2" pattern="$3" marker="$4" zip="" d
+  local name="$1" zipvar="$2" pattern="$3" marker="$4" remote="${5:-}" zip="" d
   zip="${!zipvar:-}"
   # 1) โฟลเดอร์ที่แตกไว้แล้วข้างสคริปต์
   for d in "$HERE/$name" "$PWD/$name"; do
@@ -47,7 +56,14 @@ find_src() {
   if [ -z "$zip" ]; then
     zip="$(ls -1t "$HERE"/$pattern "$PWD"/$pattern 2>/dev/null | head -n1 || true)"
   fi
-  [ -n "$zip" ] && [ -f "$zip" ] || return 1
+  # 3) ไม่มีในเครื่อง → โหลดจาก GitHub
+  if [ -z "$zip" ] || [ ! -f "$zip" ]; then
+    [ -n "$remote" ] || return 1
+    command -v curl >/dev/null || { apt-get update -qq; apt-get install -y -qq curl ca-certificates >/dev/null; }
+    zip="$WORK/$remote"
+    echo "ไม่พบ zip ในเครื่อง — ดาวน์โหลด $RAW_BASE/$remote" >&2
+    curl -fsSL "$RAW_BASE/$remote" -o "$zip" || { echo "โหลดไม่สำเร็จ (repo ต้องเป็น public และชื่อไฟล์ต้องตรง)" >&2; return 1; }
+  fi
   command -v unzip >/dev/null || { apt-get update -qq; apt-get install -y -qq unzip >/dev/null; }
   local out="$WORK/$name"; mkdir -p "$out"
   unzip -oq "$zip" -d "$out"
@@ -61,8 +77,8 @@ find_src() {
 install_wselx() {
   say "ติดตั้ง wselx"
   local src
-  src="$(find_src wselx WSELX_ZIP 'wselx*.zip' server.js)" \
-    || die "ไม่พบ wselx*.zip (หรือโฟลเดอร์ wselx) ข้างสคริปต์ — วางไฟล์ไว้โฟลเดอร์เดียวกัน หรือตั้ง WSELX_ZIP=/path/file.zip"
+  src="$(find_src wselx WSELX_ZIP 'wselx*.zip' server.js "$WSELX_REMOTE_ZIP")" \
+    || die "หา/โหลด wselx ไม่สำเร็จ — เช็กชื่อ zip บน GitHub (WSELX_REMOTE_ZIP) หรือตั้ง WSELX_ZIP=/path/file.zip"
   echo "ซอร์ส: $src"
 
   # install.sh ของ wselx ดึงโค้ดจาก git → ทำ repo ในเครื่องให้ จะได้ไม่ต้องใช้ GitHub
@@ -86,8 +102,8 @@ install_wselx() {
 install_xxtl() {
   say "ติดตั้ง xxtlonline"
   local src
-  src="$(find_src xxtlonline XXTL_ZIP 'xxtlonline*.zip' install.sh)" \
-    || die "ไม่พบ xxtlonline*.zip (หรือโฟลเดอร์ xxtlonline) ข้างสคริปต์ — วางไฟล์ไว้โฟลเดอร์เดียวกัน หรือตั้ง XXTL_ZIP=/path/file.zip"
+  src="$(find_src xxtlonline XXTL_ZIP 'xxtlonline*.zip' install.sh "$XXTL_REMOTE_ZIP")" \
+    || die "หา/โหลด xxtlonline ไม่สำเร็จ — เช็กชื่อ zip บน GitHub (XXTL_REMOTE_ZIP) หรือตั้ง XXTL_ZIP=/path/file.zip"
   echo "ซอร์ส: $src"
   # ติดตั้งจากไฟล์ในเครื่องโดยตรง (ไม่ดึงจาก GitHub) — ต้องรันจาก path จริงเพื่อให้สคริปต์หา src/ เจอ
   bash "$src/install.sh" "$@"
