@@ -217,6 +217,28 @@ if [ "$INSTALL_SHOP" = 1 ]; then
   echo "wselx     : $WSELX_DIR"
 fi
 
+# 3x-ui ที่ติดตั้งไว้ก่อนแล้ว: ร้านค้าไม่รู้ชื่อผู้ใช้/รหัสผ่าน (3x-ui เก็บแบบแฮช อ่านกลับไม่ได้) ปุ่ม "เชื่อม 3x-ui" ในหน้าแอดมินจึงถูกซ่อน
+# -> ตั้ง 3x-ui ให้ใช้แอดมินร่วมของสคริปต์ (ตามที่แจ้งไว้ว่า "ใช้ร่วมทุกระบบ") แล้วส่งให้ร้านค้าผ่าน .env
+xui_sync_creds() {
+  local pw="${ADMIN_PASSWORD:-$OLD_PW}"
+  if [ ! -x /usr/local/x-ui/x-ui ]; then return 0; fi
+  if [ -n "$XUI_PASS_ENV" ]; then return 0; fi
+  if grep -q '^XUI_PASS=.\+' "$APP_DIR/.env" 2>/dev/null; then return 0; fi
+  if [ -z "$pw" ]; then
+    warn "พบ 3x-ui เดิมแต่ไม่ทราบรหัสแอดมิน — ปุ่ม \"เชื่อม 3x-ui\" จะไม่ขึ้น (รันสคริปต์ซ้ำแล้วใส่ ADMIN_PASSWORD หรือเพิ่มเซิร์ฟเวอร์ 3x-ui เองในหน้าแอดมิน)"
+    return 0
+  fi
+  echo "พบ 3x-ui เดิมที่ร้านค้ายังเชื่อมไม่ได้ — ตั้งชื่อผู้ใช้/รหัสผ่านของ 3x-ui ให้ตรงกับแอดมินร่วม (พอร์ต $XUI_PORT, path /$XUI_BASE/)"
+  if /usr/local/x-ui/x-ui setting -username "$ADMIN_USERNAME" -password "$pw" -port "$XUI_PORT" -webBasePath "$XUI_BASE" >/dev/null 2>&1; then
+    /usr/local/x-ui/x-ui setting -listenIP 127.0.0.1 >/dev/null 2>&1 || true
+    systemctl restart x-ui || true
+    sleep 2
+    if systemctl is-active --quiet x-ui; then XUI_PASS_ENV="$pw"; else warn "3x-ui ไม่ขึ้นหลังตั้งค่า — ดู: journalctl -u x-ui -n 30"; fi
+  else
+    warn "ตั้งค่า 3x-ui เดิมไม่สำเร็จ — ปุ่ม \"เชื่อม 3x-ui\" จะไม่ขึ้น ตั้งเองด้วยคำสั่ง x-ui"
+  fi
+}
+
 install_panel() {
 if [ "$INSTALL_SHOP" = 1 ] || [ -f "$APP_DIR/.env" ]; then ROOT_DIRECTIVE='proxy_pass http://127.0.0.1:3000;'; else ROOT_DIRECTIVE='return 302 /panel/;'; fi
 
@@ -251,7 +273,8 @@ XUI_OK=0; XUI_PASS_ENV=""
 if [ "${SKIP_3XUI:-0}" = 1 ]; then
   echo "ข้าม 3x-ui (SKIP_3XUI=1)"
 elif [ -x /usr/local/x-ui/x-ui ]; then
-  echo "พบ 3x-ui เดิม — ไม่แตะค่าเดิม"; XUI_OK=1
+  XUI_OK=1
+  if [ "$INSTALL_SHOP" = 1 ]; then xui_sync_creds; else echo "พบ 3x-ui เดิม — ไม่แตะค่าเดิม"; fi
 else
   say "ติดตั้ง 3x-ui"
   case "$(uname -m)" in x86_64|amd64) XA=amd64 ;; aarch64|arm64) XA=arm64 ;; *) XA="" ;; esac
@@ -408,6 +431,7 @@ fi
 
   fi
   if [ "$XUI_OK" = 0 ] && [ -x /usr/local/x-ui/x-ui ]; then XUI_OK=1; fi
+  if [ "$XUI_OK" = 1 ]; then xui_sync_creds; fi
 # ---------- 7) wselx (ร้านค้า) ----------
 say "ติดตั้ง wselx"
 command -v git >/dev/null || { apt-get update -qq; apt-get install -y -qq git >/dev/null; }
@@ -435,6 +459,17 @@ REPO_URL="$WSELX_SRC" BRANCH=main APP_DIR="$APP_DIR" \
   if [ -f /etc/nginx/conf.d/wselx-xxtl.conf ] && grep -q 'return 302 /panel/;' /etc/nginx/conf.d/wselx-xxtl.conf; then
     sed -i 's#return 302 /panel/;#proxy_pass http://127.0.0.1:3000;#' /etc/nginx/conf.d/wselx-xxtl.conf
     nginx -t >/dev/null 2>&1 && systemctl reload nginx || true
+  fi
+
+  # ปุ่ม "เปิดแดชบอร์ด XXTLONLINE" ในหน้าแอดมิน: ถ้ามีพอร์ตตรง (6787) ให้ชี้ไปที่นั่น ไม่งั้นใช้ /panel/
+  if [ -f /etc/nginx/conf.d/wselx-xxtl.conf ] && grep -q "listen ${DASH_HTTPS_PORT} ssl;" /etc/nginx/conf.d/wselx-xxtl.conf \
+     && grep -q '^XXT_PANEL_URL=.\+' "$APP_DIR/.env" 2>/dev/null; then
+    if grep -q '^XXT_PANEL_WEB=' "$APP_DIR/.env"; then
+      sed -i "s|^XXT_PANEL_WEB=.*|XXT_PANEL_WEB=https://${DOMAIN}:${DASH_HTTPS_PORT}/|" "$APP_DIR/.env"
+    else
+      echo "XXT_PANEL_WEB=https://${DOMAIN}:${DASH_HTTPS_PORT}/" >> "$APP_DIR/.env"
+    fi
+    systemctl restart wselx || true
   fi
 
   # ร้านค้าที่ https://โดเมน:$SHOP_HTTPS_PORT (ใช้เมื่อมีใบรับรองจริง; ไม่แตะ 3x-ui/แดชบอร์ด)
