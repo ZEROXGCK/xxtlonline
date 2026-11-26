@@ -79,7 +79,7 @@ ask_yn() {   # ask_yn "คำถาม" [y|n]  → คืน 0 = ใช่, 1 = 
 find_src() {
   local name="$1" zipvar="$2" pattern="$3" marker="$4" remote="${5:-}" zip="" d
   zip="${!zipvar:-}"
-  for d in "$HERE/$name" "$PWD/$name" "/root/$name" "/opt/$name-src"; do
+  for d in "$HERE/$name" "$PWD/$name" "/root/$name"; do
     [ -f "$d/$marker" ] && { echo "$d"; return 0; }
   done
   if [ -z "$zip" ]; then
@@ -198,6 +198,10 @@ fi
 if command -v ufw >/dev/null && ufw status 2>/dev/null | grep -q "Status: active"; then ufw allow 22/tcp >/dev/null 2>&1 || true; fi
 
 if [ -z "$ADMIN_PASSWORD" ] && [ -n "$OLD_PW" ]; then PW_NOTE="$OLD_PW"; fi
+if [ -n "$ADMIN_PASSWORD" ]; then
+  ( umask 077; printf 'แอดมิน (ใช้ร่วมกันทุกระบบ)\n  ชื่อผู้ใช้   : %s\n  รหัสผ่าน    : %s\n' "$ADMIN_USERNAME" "$ADMIN_PASSWORD" > "$INFO_FILE" )
+  chmod 600 "$INFO_FILE"
+fi
 say "เริ่มติดตั้งสำหรับ $DOMAIN (IP $IP)"
 
 # ---------- 3) ซอร์สโค้ด (หาไฟล์ที่ต้องใช้ก่อน จะได้ไม่ติดตั้งครึ่งทางแล้วค่อยพบว่าไม่มีไฟล์) ----------
@@ -304,11 +308,12 @@ else
 fi
 
 # ---------- 8) ตั้งค่า nginx ----------
+L6() { if [ -e /proc/net/if_inet6 ]; then echo "listen [::]:$1 ssl;"; fi; }
 cat > /etc/nginx/conf.d/wselx-xxtl.conf <<NGX
 # สร้างโดย setup.sh — ฟังพอร์ต 443 เท่านั้น (พอร์ต 80 เป็นของ xxtlonline-ws)
 server {
     listen 443 ssl;
-    listen [::]:443 ssl;
+    $(L6 443)
     server_name ${DOMAIN};
     ssl_certificate     ${SSL_CRT};
     ssl_certificate_key ${SSL_KEY};
@@ -359,7 +364,7 @@ if [ "$CERT_OK" = 1 ]; then
   cat > /etc/nginx/conf.d/xxtl-dash-port.conf <<NGX
 server {
     listen ${DASH_HTTPS_PORT} ssl;
-    listen [::]:${DASH_HTTPS_PORT} ssl;
+    $(L6 ${DASH_HTTPS_PORT})
     server_name ${DOMAIN};
     ssl_certificate     ${SSL_CRT};
     ssl_certificate_key ${SSL_KEY};
@@ -390,6 +395,7 @@ fi
 }
 
 install_shop() {
+  L6() { if [ -e /proc/net/if_inet6 ]; then echo "listen [::]:$1 ssl;"; fi; }
   PANEL_THERE=0; [ -f /etc/xxtlonline/dashboard.json ] && PANEL_THERE=1
   XXT_KEY=""
   if [ "$PANEL_THERE" = 1 ]; then
@@ -407,8 +413,10 @@ say "ติดตั้ง wselx"
 command -v git >/dev/null || { apt-get update -qq; apt-get install -y -qq git >/dev/null; }
 mkdir -p "$WSELX_SRC"
 [ -d "$WSELX_SRC/.git" ] || git -C "$WSELX_SRC" init -q -b main
-find "$WSELX_SRC" -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
-cp -a "$WSELX_DIR"/. "$WSELX_SRC"/
+if [ "$(readlink -f "$WSELX_DIR")" != "$(readlink -f "$WSELX_SRC")" ]; then
+  find "$WSELX_SRC" -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
+  cp -a "$WSELX_DIR"/. "$WSELX_SRC"/
+fi
 # กันบั๊ก BIGINT → string (ปุ่มสั่งซื้อกดไม่ได้) ถ้า zip รุ่นเก่ายังไม่มีแพตช์
 if ! grep -q "setTypeParser" "$WSELX_SRC/server.js"; then
   sed -i "0,/^const { Pool } = require('pg');/s//const { Pool, types: pgTypes } = require('pg');\npgTypes.setTypeParser(20, v => parseInt(v, 10));/" "$WSELX_SRC/server.js"
@@ -435,7 +443,7 @@ REPO_URL="$WSELX_SRC" BRANCH=main APP_DIR="$APP_DIR" \
     cat > /etc/nginx/conf.d/xxtl-shop-port.conf <<NGX
 server {
     listen ${SHOP_HTTPS_PORT} ssl;
-    listen [::]:${SHOP_HTTPS_PORT} ssl;
+    $(L6 ${SHOP_HTTPS_PORT})
     server_name ${DOMAIN};
     ssl_certificate     /etc/letsencrypt/live/${DOMAIN}/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/${DOMAIN}/privkey.pem;
@@ -486,6 +494,7 @@ write_info() {
       echo "  SSH + HTTP  : พอร์ต 80"
       echo "  HTTP Proxy  : พอร์ต 80 (ช่อง Proxy = ของค่าย, Address/Port ยังเป็นเครื่องนี้)"
       echo "  (พอร์ต 443 ใช้กับเว็บเท่านั้น ไม่ใช่ VPN)"
+      echo "  หมายเหตุ: เปิดแดชบอร์ดด้วย https:// เท่านั้น — http://$DOMAIN (พอร์ต 80) คือ VPN ไม่ใช่หน้าเว็บ จึงเข้าไม่ได้"
       echo "  Response    : 200 Connection established"
       echo "  Payload     : GET / HTTP/1.1[crlf]Host: [host][crlf]Upgrade: websocket[crlf][crlf]"
     fi
@@ -512,6 +521,7 @@ show_box() {
   echo "  ║  🔌 SSH เครื่อง : ssh root@$IP  (พอร์ต 22 ปกติ)"
   echo "  ╚══════════════════════════════════════════════════════════"
   printf '\033[0m'
+  [ "$HAVE_PANEL" != 1 ] || warn "ถ้าเปิดลิงก์จากข้างนอกไม่ได้ทั้งที่ตรวจข้างบนผ่าน = พอร์ตถูกบล็อกที่ Security Group/Firewall ของผู้ให้บริการ VPS — เปิด TCP 443, ${DASH_HTTPS_PORT} (แดชบอร์ด), ${SHOP_HTTPS_PORT} (ร้านค้า) และ 80 ที่หน้าเว็บผู้ให้บริการด้วย (ufw ในเครื่องอย่างเดียวไม่พอ)"
   [ "$CERT_OK" = 1 ] || warn "ยังไม่มี HTTPS จริง — เปิดลิงก์ด้านบนแล้วเบราว์เซอร์จะเตือนใบรับรอง (กดดำเนินการต่อได้) แล้วรันสคริปต์ซ้ำเมื่อ DNS พร้อม"
   return 0
 }
@@ -542,6 +552,26 @@ print("ผ่าน" if r.startswith(b"HTTP/1.1 ") else "ล้มเหลว")
 PY
 )"
     echo "   VPN WebSocket พอร์ต 80          → $vpn"
+    echo "   แดชบอร์ดตรง 127.0.0.1:8088      → HTTP $(curl -s -o /dev/null -w '%{http_code}' --max-time 8 -H "Host: $DOMAIN" http://127.0.0.1:8088/ || echo 000)"
+    # ลองล็อกอินแดชบอร์ดด้วยรหัสที่แสดงในกล่องสรุปจริง ๆ — ถ้าไม่ตรงจะบอกวิธีแก้ทันที
+    if [ -n "$PW_NOTE" ] && [[ "$PW_NOTE" != "("* ]]; then
+      local lc
+      lc="$(python3 - "$DOMAIN" "$ADMIN_USERNAME" "$PW_NOTE" <<'PY' 2>/dev/null || echo err
+import sys, json, http.client
+d, u, p = sys.argv[1:4]
+c = http.client.HTTPConnection("127.0.0.1", 8088, timeout=8)
+c.request("POST", "/api/login", json.dumps({"username": u, "password": p}),
+          {"Host": d, "Content-Type": "application/json", "X-Real-IP": "127.0.0.1"})
+print(c.getresponse().status)
+PY
+)"
+      if [ "$lc" = 200 ]; then echo "   ล็อกอินแดชบอร์ดด้วยรหัสด้านล่าง → ผ่าน"
+      else
+        echo "   ล็อกอินแดชบอร์ดด้วยรหัสด้านล่าง → ไม่ผ่าน (HTTP $lc)"
+        warn "รหัสที่แสดงไม่ตรงกับรหัสในแดชบอร์ด (มักเกิดเมื่อรันซ้ำหลังติดตั้งครั้งแรกหยุดกลางทาง) — ตั้งรหัสใหม่:"
+        echo "      printf '%s\n' 'รหัสใหม่ 8 ตัวขึ้นไป' | sudo python3 /opt/xxtlonline-dash/app.py --set-password --stdin --user $ADMIN_USERNAME"
+      fi
+    fi
   fi
 
   show_box
